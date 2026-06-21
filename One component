@@ -1,0 +1,168 @@
+import { LightningElement, track, wire } from 'lwc';
+import { NavigationMixin }              from 'lightning/navigation';
+import { ShowToastEvent }               from 'lightning/platformShowToastEvent';
+import getDashboardSummary from '@salesforce/apex/PropertyOwnerDashboardController.getDashboardSummary';
+import getMyProperties     from '@salesforce/apex/PropertyOwnerDashboardController.getMyProperties';
+
+
+const FILTER_OPTIONS = [
+    { label: 'All',           value: 'All' },
+    { label: 'Active',        value: 'Active' },
+    { label: 'Pending',       value: 'Pending Clerk Review' },
+    { label: 'Rejected',      value: 'Rejected' },
+    { label: 'Pending Taxes', value: 'Pending Taxes' },
+];
+
+
+const SETTLED_PAYMENT_STATES = ['Paid', 'Success', 'Pending Verification'];
+
+
+export default class PropertyOwnerDashboard extends NavigationMixin(LightningElement) {
+
+    @track summary          = {};
+    @track properties       = [];
+    @track recentPayments   = [];
+   errorMessage     = null;
+   searchTerm       = '';
+   activeFilter     = 'All';
+   debouncedSearch  = '';
+
+    summaryLoading    = true;
+    summaryLoaded     = false;
+    propertiesLoading = true;
+    propertiesLoaded  = false;
+    paymentsLoading   = true;
+    paymentsLoaded    = false;
+
+    searchTimer = null;
+
+  
+
+    connectedCallback() {
+        this.loadProperties();
+    }
+
+ @wire(getDashboardSummary, {})
+wiredSummary({ error, data }) {
+    if(data) {
+
+        this.summary        = data;
+        this.summaryLoading = false;
+        this.summaryLoaded  = true;
+    } else if(error) {
+        this.summaryLoading = false;
+        this.showError(this.extractError(error));
+    }
+}
+
+    // Properties — imperative call to bypass cache
+    loadProperties() {
+        this.propertiesLoading = true;
+        this.propertiesLoaded  = false;
+
+       
+        const isPendingTaxes = this.activeFilter === 'Pending Taxes';
+
+        getMyProperties({
+            statusFilter: isPendingTaxes ? 'All' : this.activeFilter,
+            searchTerm  : this.debouncedSearch
+        })
+        .then(data => {
+            let list = data.map(p => ({ ...p, isSelected: false }));
+            if (isPendingTaxes) {
+                list = list.filter(p =>
+                    p.assessmentId != null &&
+                    !SETTLED_PAYMENT_STATES.includes(p.paymentStatus)
+                );
+            }
+            this.properties        = list;
+            this.propertiesLoading = false;
+            this.propertiesLoaded  = true;
+        })
+        .catch(error => {
+            this.propertiesLoading = false;
+            this.showError(this.extractError(error));
+        });
+    }
+
+  
+
+    handleSearch(event) {
+        this.searchTerm = event.target.value;
+        clearTimeout(this.searchTimer);
+        this.searchTimer = setTimeout(() => {
+            this.debouncedSearch = this.searchTerm;
+            this.loadProperties();
+        }, 350);
+    }
+
+    get filterOptions() {
+        return FILTER_OPTIONS;
+    }
+
+    handleFilterChange(event) {
+        this.activeFilter = event.target.dataset.value;
+        this.loadProperties();
+    }
+
+    get hasProperties() { return this.properties && this.properties.length > 0; }
+    get hasPayments()   { return this.recentPayments && this.recentPayments.length > 0; }
+
+    get formattedTaxDue()  { return this.formatCurrency(this.summary?.totalTaxDue); }
+    get formattedTaxPaid() { return this.formatCurrency(this.summary?.totalTaxPaid); }
+
+    handlePropertySelect(event) {
+        const selectedId = event.detail.propertyId;
+        this.properties  = this.properties.map(p => ({
+            ...p, isSelected: p.propertyId === selectedId
+        }));
+    }
+
+    handleMakePayment(event) {
+        const { assessmentId } = event.detail;
+        this[NavigationMixin.Navigate]({
+            type      : 'comm__namedPage',
+            attributes: { name: 'Make_Payment__c' },
+            state     : { assessmentId: assessmentId }
+        });
+    }
+
+    handleRegisterProperty() {
+        this[NavigationMixin.Navigate]({
+            type      : 'comm__namedPage',
+            attributes: { name: 'Property_Registration__c' }
+        });
+    }
+
+    handleViewAllPayments() {
+        this[NavigationMixin.Navigate]({
+            type      : 'comm__namedPage',
+            attributes: { name: 'Payment_History__c' }
+        });
+    }
+
+    formatCurrency(value) {
+        if(value == null) return '₹0';
+        return '₹' + Number(value).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+    }
+
+    extractError(error) {
+        if(error?.body?.message) return error.body.message;
+        if(error?.message)       return error.message;
+        return 'An unexpected error occurred.';
+    }
+
+    showError(msg) {
+        this.errorMessage = msg;
+        this.dispatchEvent(new ShowToastEvent({ title: 'Error', message: msg, variant: 'error' }));
+    }
+
+    handleViewDetail(event) {
+        const { propertyId } = event.detail;
+        this[NavigationMixin.Navigate]({
+            type      : 'comm__namedPage',
+            attributes: { name: 'property_Detail__c' },
+            state     : { propertyId: propertyId }
+        });
+    }
+}
